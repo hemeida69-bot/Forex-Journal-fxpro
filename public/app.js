@@ -191,11 +191,32 @@ function renderNav() {
 }
 
 // ---------- Dashboard ----------
+function addWorkingDays(startDate, days) {
+  const d = new Date(startDate);
+  let added = 0;
+  while (added < days) {
+    d.setDate(d.getDate() + 1);
+    const dow = d.getDay();
+    if (dow !== 0 && dow !== 6) added++;
+  }
+  return d;
+}
+
 function renderDashboard(enriched, closed, totalPL, balance, todayPL) {
   const s = state.settings;
   let running = s.startingBalance, peak = running;
   const sorted = [...closed].sort((a, b) => new Date(a.date) - new Date(b.date));
   const equityPoints = sorted.map((t) => { running += t.pl; if (running > peak) peak = running; return running; });
+
+  // pace toward profit target, based on actual trading days so far
+  const dailyTotals = {};
+  closed.forEach((t) => { if (t.date) dailyTotals[t.date] = (dailyTotals[t.date] || 0) + t.pl; });
+  const tradingDays = Object.keys(dailyTotals);
+  const avgDailyPL = tradingDays.length ? tradingDays.reduce((a, d) => a + dailyTotals[d], 0) / tradingDays.length : null;
+  const remaining = Math.max(0, s.profitTarget - totalPL);
+  const workingDaysNeeded = avgDailyPL && avgDailyPL > 0 ? Math.ceil(remaining / avgDailyPL) : null;
+  const expectedDate = workingDaysNeeded != null ? addWorkingDays(new Date(), workingDaysNeeded) : null;
+  const suggestedDailyTarget = remaining / 20; // benchmark: reach it within ~20 trading days (~1 month)
 
   const drawdown = Math.max(0, peak - balance);
   const dailyLossUsed = Math.max(0, -todayPL);
@@ -243,14 +264,23 @@ function renderDashboard(enriched, closed, totalPL, balance, todayPL) {
   const w = 280, h = 100;
   let sparkline = "";
   if (equityPoints.length > 1) {
-    const min = Math.min(...equityPoints), max = Math.max(...equityPoints);
+    const targetBalance = s.startingBalance + s.profitTarget;
+    const allValues = [...equityPoints, targetBalance];
+    const min = Math.min(...allValues), max = Math.max(...allValues);
     const range = max - min || 1;
     const pts = equityPoints.map((v, i) => {
       const x = (i / (equityPoints.length - 1)) * w;
       const y = h - ((v - min) / range) * h;
       return `${x},${y}`;
     }).join(" ");
-    sparkline = `<svg viewBox="0 0 ${w} ${h}" style="width:100%;height:140px" preserveAspectRatio="none"><polyline points="${pts}" fill="none" stroke="var(--gold)" stroke-width="2"/></svg>`;
+    const targetY = h - ((targetBalance - min) / range) * h;
+    sparkline = `
+      <svg viewBox="0 0 ${w} ${h + 14}" style="width:100%;height:150px" preserveAspectRatio="none">
+        <line x1="0" y1="${targetY}" x2="${w}" y2="${targetY}" stroke="var(--text-muted)" stroke-width="1" stroke-dasharray="3,3"/>
+        <text x="${w}" y="${targetY - 4}" fill="var(--text-muted)" font-size="8" font-family="var(--font-mono)" text-anchor="end">target</text>
+        <polyline points="${pts}" fill="none" stroke="var(--gold)" stroke-width="2"/>
+      </svg>
+    `;
   } else {
     sparkline = `<p class="muted" style="font-size:13px;margin:0">Not enough closed trades yet.</p>`;
   }
@@ -276,9 +306,29 @@ function renderDashboard(enriched, closed, totalPL, balance, todayPL) {
         ${statCell("Total P&L", fmtMoney(totalPL, s.currency), totalPL >= 0 ? "var(--profit)" : "var(--loss)")}
       </div>
     </div>
-    <div class="panel" style="margin-bottom:0">
+    <div class="panel">
       <p class="muted" style="font-size:13px;margin:0 0 14px;font-weight:500">Equity curve</p>
       ${sparkline}
+    </div>
+    <div class="panel" style="margin-bottom:0">
+      <p class="muted" style="font-size:13px;margin:0 0 14px;font-weight:500">Path to profit target</p>
+      <div style="display:flex;justify-content:space-between;padding:8px 0;border-bottom:0.5px solid var(--border)">
+        <span style="font-size:13px">Remaining to target</span>
+        <span class="mono" style="font-size:13px">${fmtMoney(remaining, s.currency)}</span>
+      </div>
+      <div style="display:flex;justify-content:space-between;padding:8px 0;border-bottom:0.5px solid var(--border)">
+        <span style="font-size:13px">Your avg pace</span>
+        <span class="mono" style="font-size:13px;color:${avgDailyPL == null ? "var(--text)" : avgDailyPL >= 0 ? "var(--profit)" : "var(--loss)"}">${avgDailyPL == null ? "Not enough data yet" : `${fmtMoney(avgDailyPL, s.currency)}/day`}</span>
+      </div>
+      <div style="display:flex;justify-content:space-between;padding:8px 0;border-bottom:0.5px solid var(--border)">
+        <span style="font-size:13px">At this pace</span>
+        <span class="mono" style="font-size:13px">${workingDaysNeeded == null ? "—" : `${workingDaysNeeded} trading day${workingDaysNeeded === 1 ? "" : "s"}`}</span>
+      </div>
+      <div style="display:flex;justify-content:space-between;padding:8px 0">
+        <span style="font-size:13px">Expected around</span>
+        <span class="mono" style="font-size:13px;color:var(--gold)">${expectedDate ? fmtDate(expectedDate) : "—"}</span>
+      </div>
+      <p class="muted" style="font-size:11.5px;margin:12px 0 0;line-height:1.5">To hit it within about a month (20 trading days) instead, aim for roughly <span class="mono" style="color:var(--text)">${fmtMoney(suggestedDailyTarget, s.currency)}/day</span>.</p>
     </div>
   `;
 }
