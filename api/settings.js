@@ -15,7 +15,6 @@ function pageToSettings(page) {
     dailyLossLimit: p["Daily Loss Limit"] && p["Daily Loss Limit"].number != null ? p["Daily Loss Limit"].number : 500,
     maxOverallLoss: p["Max Overall Loss"] && p["Max Overall Loss"].number != null ? p["Max Overall Loss"].number : 1000,
     profitTarget: p["Profit Target"] && p["Profit Target"].number != null ? p["Profit Target"].number : 500,
-    dailyTarget: p["Daily Target"] && p["Daily Target"].number != null ? p["Daily Target"].number : 100,
   };
 }
 
@@ -29,7 +28,6 @@ function settingsToProperties(s) {
     "Daily Loss Limit": { number: parseFloat(s.dailyLossLimit) || 0 },
     "Max Overall Loss": { number: parseFloat(s.maxOverallLoss) || 0 },
     "Profit Target": { number: parseFloat(s.profitTarget) || 0 },
-    "Daily Target": { number: parseFloat(s.dailyTarget) || 0 },
   };
 }
 
