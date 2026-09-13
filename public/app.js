@@ -10,6 +10,8 @@ const state = {
   confirmDeleteId: null,
   calOffset: 0,
   calSelected: todayStr(),
+  livePrice: null,
+  priceError: false,
 };
 
 const EMOTIONS = ["calm", "confident", "disciplined", "fomo", "anxious", "revenge", "greedy", "uncertain"];
@@ -90,6 +92,7 @@ const updateTrade = (id, t) => api(`/trades/${id}`, { method: "PUT", body: JSON.
 const deleteTradeApi = (id) => api(`/trades/${id}`, { method: "DELETE" });
 const getSettings = () => api("/settings");
 const putSettings = (s) => api("/settings", { method: "PUT", body: JSON.stringify(s) });
+const getPrice = (symbol) => api(`/price?symbol=${encodeURIComponent(symbol || "XAU")}`);
 
 // ---------- init ----------
 async function init() {
@@ -102,6 +105,18 @@ async function init() {
     state.saveError = true;
   }
   state.loaded = true;
+  render();
+  refreshPrice();
+}
+
+async function refreshPrice() {
+  try {
+    const base = (state.settings.symbol || "XAU").replace(/USD$/i, "") || "XAU";
+    state.livePrice = await getPrice(base);
+    state.priceError = false;
+  } catch (e) {
+    state.priceError = true;
+  }
   render();
 }
 
@@ -145,11 +160,25 @@ function render() {
 function renderHeader(balance, todayPL) {
   const s = state.settings;
   const c = todayPL > 0 ? "var(--profit)" : todayPL < 0 ? "var(--loss)" : "var(--text)";
+  let priceLine;
+  if (state.livePrice) {
+    priceLine = `<span class="mono" style="font-size:13px;color:var(--text)">${fmtMoney(state.livePrice.price, s.currency)}</span>`;
+  } else if (state.priceError) {
+    priceLine = `<span class="muted" style="font-size:12px">price unavailable</span>`;
+  } else {
+    priceLine = `<span class="muted" style="font-size:12px">loading price…</span>`;
+  }
   return `
     <div style="margin-bottom:18px">
-      <div style="display:flex;align-items:center;gap:7px;margin-bottom:14px">
-        <span style="width:7px;height:7px;border-radius:50%;background:var(--gold-fill);display:inline-block"></span>
-        <span class="muted" style="font-size:13px">${esc(s.symbol)} · ${esc(s.broker)}</span>
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px">
+        <div style="display:flex;align-items:center;gap:7px">
+          <span style="width:7px;height:7px;border-radius:50%;background:var(--gold-fill);display:inline-block"></span>
+          <span class="muted" style="font-size:13px">${esc(s.symbol)} · ${esc(s.broker)}</span>
+        </div>
+        <button id="refresh-price" style="background:none;border:none;padding:2px;display:flex;align-items:center;gap:6px;color:var(--text-muted)">
+          ${priceLine}
+          <span style="font-size:14px">↻</span>
+        </button>
       </div>
       <p class="muted" style="font-size:12px;margin:0 0 4px">Account balance</p>
       <div style="display:flex;justify-content:space-between;align-items:flex-end;flex-wrap:wrap;gap:10px">
@@ -488,7 +517,13 @@ function renderTradeForm() {
         </div>
       </div>
       <div class="row">
-        <div class="field"><label>Entry price</label><input class="mono" id="tf-entry" value="${esc(t.entry)}" inputmode="decimal" /></div>
+        <div class="field">
+          <label>Entry price</label>
+          <div style="display:flex;gap:6px">
+            <input class="mono" id="tf-entry" value="${esc(t.entry)}" inputmode="decimal" />
+            ${state.livePrice ? `<button type="button" id="use-live-price" class="btn-outline" style="flex:0 0 auto;padding:0 10px;white-space:nowrap">Use live</button>` : ""}
+          </div>
+        </div>
         <div class="field"><label>Exit price (optional)</label><input class="mono" id="tf-exit" value="${esc(t.exit)}" inputmode="decimal" /></div>
       </div>
       <div class="row">
@@ -516,6 +551,12 @@ function attachFormHandlers() {
     });
   });
   document.getElementById("form-back").addEventListener("click", () => { state.formOpen = false; state.editingTrade = null; render(); });
+  const useLiveBtn = document.getElementById("use-live-price");
+  if (useLiveBtn) {
+    useLiveBtn.addEventListener("click", () => {
+      if (state.livePrice) document.getElementById("tf-entry").value = state.livePrice.price.toFixed(2);
+    });
+  }
   document.getElementById("tf-submit").addEventListener("click", async () => {
     const val = (id) => document.getElementById(id).value;
     const entry = val("tf-entry"), lot = val("tf-lot");
@@ -556,6 +597,9 @@ function attachFormHandlers() {
 
 // ---------- main handlers ----------
 function attachMainHandlers(enriched) {
+  const priceBtn = document.getElementById("refresh-price");
+  if (priceBtn) priceBtn.addEventListener("click", () => { state.livePrice = null; state.priceError = false; render(); refreshPrice(); });
+
   document.querySelectorAll("[data-expand]").forEach((el) => {
     el.addEventListener("click", () => {
       const id = el.dataset.expand;
