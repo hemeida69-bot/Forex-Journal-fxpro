@@ -320,6 +320,9 @@ function renderDashboard(enriched, closed, totalPL, balance, todayPL) {
       ${objRow("Daily loss limit", `Today: ${fmtMoney(todayPL, s.currency)} / limit -${s.dailyLossLimit.toLocaleString()}.00`, s.dailyLossLimit > 0 ? dailyLossUsed / s.dailyLossLimit : 0, dailyBreached)}
       ${objRow("Max loss", `Drawdown: -${drawdown.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} / limit -${s.maxOverallLoss.toLocaleString()}.00`, s.maxOverallLoss > 0 ? drawdown / s.maxOverallLoss : 0, maxLossBreached)}
       ${objRow("Profit target", `${fmtMoney(Math.max(totalPL, 0), s.currency)} / ${fmtMoney(s.profitTarget, s.currency)}`, s.profitTarget > 0 ? Math.max(totalPL, 0) / s.profitTarget : 0, !profitReached)}
+      <div style="margin-bottom:0">
+        ${objRow("Daily target", `Today: ${fmtMoney(Math.max(todayPL, 0), s.currency)} / goal ${fmtMoney(s.dailyTarget, s.currency)}`, s.dailyTarget > 0 ? Math.max(todayPL, 0) / s.dailyTarget : 0, !(s.dailyTarget > 0 && todayPL >= s.dailyTarget))}
+      </div>
     </div>
     <div class="panel">
       <p class="muted" style="font-size:13px;margin:0 0 14px;font-weight:500">Statistics</p>
@@ -480,6 +483,7 @@ function renderTargets() {
       <div class="field"><label>Daily loss limit ($)</label><input class="mono" id="f-dailyLossLimit" value="${s.dailyLossLimit}" inputmode="decimal" /></div>
       <div class="field"><label>Max overall loss ($)</label><input class="mono" id="f-maxOverallLoss" value="${s.maxOverallLoss}" inputmode="decimal" /></div>
       <div class="field"><label>Profit target ($)</label><input class="mono" id="f-profitTarget" value="${s.profitTarget}" inputmode="decimal" /></div>
+      <div class="field"><label>Daily target ($)</label><input class="mono" id="f-dailyTarget" value="${s.dailyTarget}" inputmode="decimal" /></div>
       <p class="muted" style="font-size:12px;margin:0 0 16px;line-height:1.5">These set the reference lines objectives are measured against — set them to whatever risk plan you're running on ${esc(s.broker) || "your broker"}.</p>
       <div style="border-top:0.5px solid var(--border);padding-top:14px;margin-bottom:14px">
         <div class="row">
@@ -637,6 +641,7 @@ function attachMainHandlers(enriched) {
         dailyLossLimit: parseFloat(val("f-dailyLossLimit")) || 0,
         maxOverallLoss: parseFloat(val("f-maxOverallLoss")) || 0,
         profitTarget: parseFloat(val("f-profitTarget")) || 0,
+        dailyTarget: parseFloat(val("f-dailyTarget")) || 0,
         symbol: val("f-symbol"),
         broker: val("f-broker"),
         currency: val("f-currency"),
