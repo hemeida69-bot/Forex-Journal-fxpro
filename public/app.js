@@ -12,6 +12,7 @@ const state = {
   calSelected: todayStr(),
   livePrice: null,
   priceError: false,
+  autoCloseNotice: null,
 };
 
 const EMOTIONS = ["calm", "confident", "disciplined", "fomo", "anxious", "revenge", "greedy", "uncertain"];
@@ -107,6 +108,7 @@ async function init() {
   state.loaded = true;
   render();
   refreshPrice();
+  setInterval(refreshPrice, 60000); // keep price (and open-trade auto-close checks) fresh while the app is open
 }
 
 async function refreshPrice() {
@@ -114,10 +116,45 @@ async function refreshPrice() {
     const base = (state.settings.symbol || "XAU").replace(/USD$/i, "") || "XAU";
     state.livePrice = await getPrice(base);
     state.priceError = false;
+    await checkAutoClose();
   } catch (e) {
     state.priceError = true;
   }
   render();
+}
+
+function symbolsMatch(tradeSymbol, feedSymbol) {
+  const norm = (x) => (x || "").toUpperCase().replace(/USD$/, "").trim();
+  return norm(tradeSymbol) === norm(feedSymbol);
+}
+
+async function checkAutoClose() {
+  if (!state.livePrice) return;
+  const price = state.livePrice.price;
+  const openTrades = state.trades.filter((t) => t.exit === "" || t.exit === null || t.exit === undefined);
+  for (const t of openTrades) {
+    if (!symbolsMatch(t.symbol, state.livePrice.symbol || state.settings.symbol)) continue;
+    const sl = t.sl !== "" && t.sl != null ? parseFloat(t.sl) : null;
+    const tp = t.tp !== "" && t.tp != null ? parseFloat(t.tp) : null;
+    let closePrice = null;
+    let reason = "";
+    if (t.direction === "buy") {
+      if (tp != null && price >= tp) { closePrice = tp; reason = "TP"; }
+      else if (sl != null && price <= sl) { closePrice = sl; reason = "SL"; }
+    } else {
+      if (tp != null && price <= tp) { closePrice = tp; reason = "TP"; }
+      else if (sl != null && price >= sl) { closePrice = sl; reason = "SL"; }
+    }
+    if (closePrice != null) {
+      try {
+        const updated = await updateTrade(t.id, { ...t, exit: closePrice });
+        state.trades = state.trades.map((x) => (x.id === updated.id ? updated : x));
+        state.autoCloseNotice = `${t.symbol} auto-closed at ${reason} (${closePrice})`;
+      } catch (e) {
+        // leave it open, will retry on next price refresh
+      }
+    }
+  }
 }
 
 // ---------- render dispatch ----------
@@ -149,9 +186,15 @@ function render() {
 
   root.innerHTML = `
     ${state.saveError ? `<div class="toast">Couldn't reach the server — check your connection</div>` : ""}
+    ${state.autoCloseNotice ? `<div class="toast" style="background:#EAF6EE;color:var(--profit);border-bottom:1px solid #CDEAD8">${esc(state.autoCloseNotice)}</div>` : ""}
     ${renderHeader(balance, todayPL)}
     ${content}
   `;
+
+  if (state.autoCloseNotice) {
+    state.autoCloseNotice = null;
+    setTimeout(() => render(), 4000);
+  }
 
   renderNav();
   attachMainHandlers(enriched);
@@ -314,7 +357,36 @@ function renderDashboard(enriched, closed, totalPL, balance, todayPL) {
     sparkline = `<p class="muted" style="font-size:13px;margin:0">Not enough closed trades yet.</p>`;
   }
 
+  const openTrades = state.trades.filter((t) => t.exit === "" || t.exit === null || t.exit === undefined);
+  let openPanel = "";
+  if (openTrades.length > 0) {
+    openPanel = `
+    <div class="panel">
+      <p class="muted" style="font-size:13px;margin:0 0 14px;font-weight:500">Open positions</p>
+      ${openTrades.map((t) => {
+        const livePriceMatches = state.livePrice && symbolsMatch(t.symbol, state.livePrice.symbol || s.symbol);
+        const unrealizedPL = livePriceMatches ? calcPL({ ...t, exit: state.livePrice.price }, s.contractSize) : null;
+        return `
+          <div style="display:flex;justify-content:space-between;align-items:center;padding:9px 0;border-bottom:0.5px solid var(--border)">
+            <div style="display:flex;align-items:center;gap:8px">
+              <span style="color:${t.direction === "buy" ? "var(--profit)" : "var(--loss)"}">${t.direction === "buy" ? ICONS.up : ICONS.down}</span>
+              <div>
+                <p style="font-size:13px;margin:0">${esc(t.symbol)} <span class="muted" style="font-size:11px">@ ${esc(t.entry)}</span></p>
+                <p class="muted" style="font-size:11px;margin:0">${t.sl ? `SL ${esc(t.sl)}` : "no SL"} · ${t.tp ? `TP ${esc(t.tp)}` : "no TP"}</p>
+              </div>
+            </div>
+            <span class="mono" style="font-size:13px;color:${unrealizedPL == null ? "var(--text-muted)" : unrealizedPL >= 0 ? "var(--profit)" : "var(--loss)"}">
+              ${unrealizedPL == null ? "—" : fmtSigned(unrealizedPL, s.currency)}
+            </span>
+          </div>
+        `;
+      }).join("")}
+      <p class="muted" style="font-size:11px;margin:10px 0 0">Auto-closes at SL/TP while this app is open, checked about once a minute.</p>
+    </div>`;
+  }
+
   return `
+    ${openPanel}
     <div class="panel">
       <p class="muted" style="font-size:13px;margin:0 0 14px;font-weight:500">Objectives</p>
       ${objRow("Daily loss limit", `Today: ${fmtMoney(todayPL, s.currency)} / limit -${s.dailyLossLimit.toLocaleString()}.00`, s.dailyLossLimit > 0 ? dailyLossUsed / s.dailyLossLimit : 0, dailyBreached)}
