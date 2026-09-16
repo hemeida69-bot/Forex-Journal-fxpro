@@ -1,8 +1,10 @@
 const state = {
   loaded: false,
   saveError: false,
+  accounts: [],
+  currentAccountId: null,
   trades: [],
-  settings: null,
+  settings: null, // the current account object
   tab: "dashboard",
   formOpen: false,
   editingTrade: null,
@@ -16,7 +18,9 @@ const state = {
 };
 
 const EMOTIONS = ["calm", "confident", "disciplined", "fomo", "anxious", "revenge", "greedy", "uncertain"];
+const STRATEGIES = ["", "breakout", "SMC", "pullback", "reversal", "range", "news", "other"];
 const WEEKDAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+const ACCOUNT_STORAGE_KEY = "tj_currentAccountId";
 
 // ---------- helpers ----------
 function todayStr() {
@@ -61,6 +65,27 @@ function enrich(trades, contractSize) {
     })
     .sort((a, b) => new Date(b.date) - new Date(a.date));
 }
+function addWorkingDays(startDate, days) {
+  const d = new Date(startDate);
+  let added = 0;
+  while (added < days) {
+    d.setDate(d.getDate() + 1);
+    const dow = d.getDay();
+    if (dow !== 0 && dow !== 6) added++;
+  }
+  return d;
+}
+function symbolsMatch(tradeSymbol, feedSymbol) {
+  const norm = (x) => (x || "").toUpperCase().replace(/USD$/, "").trim();
+  return norm(tradeSymbol) === norm(feedSymbol);
+}
+function startOfWeek(d) {
+  const date = new Date(d);
+  const day = (date.getDay() + 6) % 7; // Monday = 0
+  date.setDate(date.getDate() - day);
+  date.setHours(0, 0, 0, 0);
+  return date;
+}
 
 // icons (minimal inline SVG)
 const ICONS = {
@@ -76,6 +101,8 @@ const ICONS = {
   alert: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>',
   up: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><polyline points="23 6 13.5 15.5 8.5 10.5 1 18"/><polyline points="17 6 23 6 23 12"/></svg>',
   down: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><polyline points="23 18 13.5 8.5 8.5 13.5 1 6"/><polyline points="17 18 23 18 23 12"/></svg>',
+  download: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>',
+  bell: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M18 8a6 6 0 00-12 0c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 01-3.46 0"/></svg>',
 };
 
 // ---------- API ----------
@@ -87,28 +114,80 @@ async function api(path, opts) {
   if (!res.ok) throw new Error("Request failed");
   return res.json();
 }
-const getTrades = () => api("/trades");
+const getAccounts = () => api("/accounts");
+const createAccountApi = (a) => api("/accounts", { method: "POST", body: JSON.stringify(a) });
+const updateAccountApi = (id, a) => api(`/accounts/${id}`, { method: "PUT", body: JSON.stringify(a) });
+const getTrades = (accountId, includeUnassigned) => api(`/trades?accountId=${encodeURIComponent(accountId)}${includeUnassigned ? "&includeUnassigned=1" : ""}`);
 const createTrade = (t) => api("/trades", { method: "POST", body: JSON.stringify(t) });
 const updateTrade = (id, t) => api(`/trades/${id}`, { method: "PUT", body: JSON.stringify(t) });
 const deleteTradeApi = (id) => api(`/trades/${id}`, { method: "DELETE" });
-const getSettings = () => api("/settings");
-const putSettings = (s) => api("/settings", { method: "PUT", body: JSON.stringify(s) });
 const getPrice = (symbol) => api(`/price?symbol=${encodeURIComponent(symbol || "XAU")}`);
 
 // ---------- init ----------
 async function init() {
   try {
-    const [trades, settings] = await Promise.all([getTrades(), getSettings()]);
-    state.trades = trades;
-    state.settings = settings;
+    let accounts = await getAccounts();
+    if (accounts.length === 0) {
+      const created = await createAccountApi({ name: "My Account" });
+      accounts = [created];
+    }
+    state.accounts = accounts;
+
+    const saved = localStorage.getItem(ACCOUNT_STORAGE_KEY);
+    const savedValid = saved && accounts.some((a) => a.id === saved);
+    state.currentAccountId = savedValid ? saved : accounts[0].id;
+    state.settings = accounts.find((a) => a.id === state.currentAccountId);
+
+    await loadTradesForCurrentAccount();
   } catch (e) {
-    state.settings = state.settings || { startingBalance: 10000, currency: "$", contractSize: 100, symbol: "XAUUSD", broker: "", dailyLossLimit: 500, maxOverallLoss: 1000, profitTarget: 500 };
+    state.settings = state.settings || { id: null, name: "Account", startingBalance: 10000, currency: "$", contractSize: 100, symbol: "XAUUSD", broker: "", dailyLossLimit: 500, maxOverallLoss: 1000, profitTarget: 500 };
     state.saveError = true;
   }
   state.loaded = true;
   render();
   refreshPrice();
-  setInterval(refreshPrice, 60000); // keep price (and open-trade auto-close checks) fresh while the app is open
+  setInterval(refreshPrice, 60000);
+}
+
+async function loadTradesForCurrentAccount() {
+  const isLegacyDefault = state.accounts.length > 0 && state.accounts[0].id === state.currentAccountId;
+  state.trades = await getTrades(state.currentAccountId, isLegacyDefault);
+}
+
+async function switchAccount(accountId) {
+  if (accountId === "__new__") {
+    const name = prompt("New account name (e.g. FTMO Challenge #2):");
+    if (!name) { render(); return; }
+    try {
+      const created = await createAccountApi({ name });
+      state.accounts = [...state.accounts, created];
+      state.currentAccountId = created.id;
+      localStorage.setItem(ACCOUNT_STORAGE_KEY, created.id);
+      state.settings = created;
+      state.trades = [];
+      state.tab = "targets";
+      render();
+      refreshPrice();
+    } catch (e) {
+      state.saveError = true;
+      render();
+    }
+    return;
+  }
+  state.currentAccountId = accountId;
+  localStorage.setItem(ACCOUNT_STORAGE_KEY, accountId);
+  state.settings = state.accounts.find((a) => a.id === accountId);
+  state.loaded = false;
+  render();
+  try {
+    await loadTradesForCurrentAccount();
+    state.saveError = false;
+  } catch (e) {
+    state.saveError = true;
+  }
+  state.loaded = true;
+  render();
+  refreshPrice();
 }
 
 async function refreshPrice() {
@@ -121,11 +200,6 @@ async function refreshPrice() {
     state.priceError = true;
   }
   render();
-}
-
-function symbolsMatch(tradeSymbol, feedSymbol) {
-  const norm = (x) => (x || "").toUpperCase().replace(/USD$/, "").trim();
-  return norm(tradeSymbol) === norm(feedSymbol);
 }
 
 async function checkAutoClose() {
@@ -149,7 +223,11 @@ async function checkAutoClose() {
       try {
         const updated = await updateTrade(t.id, { ...t, exit: closePrice });
         state.trades = state.trades.map((x) => (x.id === updated.id ? updated : x));
-        state.autoCloseNotice = `${t.symbol} auto-closed at ${reason} (${closePrice})`;
+        const msg = `${t.symbol} auto-closed at ${reason} (${closePrice})`;
+        state.autoCloseNotice = msg;
+        if ("Notification" in window && Notification.permission === "granted") {
+          try { new Notification("Trade closed", { body: msg }); } catch (e2) {}
+        }
       } catch (e) {
         // leave it open, will retry on next price refresh
       }
@@ -213,11 +291,11 @@ function renderHeader(balance, todayPL) {
   }
   return `
     <div style="margin-bottom:18px">
-      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px">
-        <div style="display:flex;align-items:center;gap:7px">
-          <span style="width:7px;height:7px;border-radius:50%;background:var(--gold-fill);display:inline-block"></span>
-          <span class="muted" style="font-size:13px">${esc(s.symbol)} · ${esc(s.broker)}</span>
-        </div>
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;gap:8px">
+        <select id="account-switcher" style="width:auto;max-width:60%;background:var(--panel-alt);border:1px solid var(--border);border-radius:20px;padding:5px 10px;font-size:12.5px;color:var(--text)">
+          ${state.accounts.map((a) => `<option value="${a.id}" ${a.id === state.currentAccountId ? "selected" : ""}>${esc(a.name)}</option>`).join("")}
+          <option value="__new__">+ New account…</option>
+        </select>
         <button id="refresh-price" style="background:none;border:none;padding:2px;display:flex;align-items:center;gap:6px;color:var(--text-muted)">
           ${priceLine}
           <span style="font-size:14px">↻</span>
@@ -226,17 +304,16 @@ function renderHeader(balance, todayPL) {
       <p class="muted" style="font-size:12px;margin:0 0 4px">Account balance</p>
       <div style="display:flex;justify-content:space-between;align-items:flex-end;flex-wrap:wrap;gap:10px">
         <p class="mono" style="font-size:30px;font-weight:600;margin:0">${fmtMoney(balance, s.currency)}</p>
-        <span class="mono" style="font-size:12.5px;color:var(--text-muted);background:var(--panel-alt);border:0.5px solid var(--border);border-radius:20px;padding:5px 12px">
+        <span class="mono" style="font-size:12.5px;color:var(--text-muted);background:var(--panel-alt);border:1px solid var(--border);border-radius:20px;padding:5px 12px">
           Today <span style="color:${c}">${fmtSigned(todayPL, s.currency)}</span>
         </span>
       </div>
-      <div style="border-bottom:0.5px solid var(--border);margin-top:16px"></div>
+      <div style="border-bottom:1px solid var(--border);margin-top:16px"></div>
     </div>
   `;
 }
 
 function renderNav() {
-  const app = document.getElementById("app");
   const items = [
     { key: "dashboard", label: "Dashboard", icon: ICONS.dashboard },
     { key: "trades", label: "Trades", icon: ICONS.list },
@@ -263,15 +340,28 @@ function renderNav() {
 }
 
 // ---------- Dashboard ----------
-function addWorkingDays(startDate, days) {
-  const d = new Date(startDate);
-  let added = 0;
-  while (added < days) {
-    d.setDate(d.getDate() + 1);
-    const dow = d.getDay();
-    if (dow !== 0 && dow !== 6) added++;
-  }
-  return d;
+function objRow(label, detail, ratio, breached) {
+  const pct = Math.max(0, Math.min(100, ratio * 100));
+  return `
+    <div style="margin-bottom:16px">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
+        <div>
+          <p style="font-size:14px;margin:0 0 2px">${label}</p>
+          <p class="mono muted" style="font-size:12px;margin:0">${detail}</p>
+        </div>
+        <div style="width:22px;height:22px;border-radius:50%;display:flex;align-items:center;justify-content:center;flex-shrink:0;background:${breached ? "rgba(193,57,43,0.12)" : "rgba(30,142,82,0.12)"};color:${breached ? "var(--loss)" : "var(--profit)"}">
+          ${breached ? ICONS.alert : ICONS.check}
+        </div>
+      </div>
+      <div style="height:4px;background:var(--panel-alt);border-radius:2px;overflow:hidden">
+        <div style="height:100%;width:${pct}%;background:var(--gold-fill);border-radius:2px"></div>
+      </div>
+    </div>
+  `;
+}
+
+function statCell(label, value, color) {
+  return `<div><p class="mono" style="font-size:17px;margin:0 0 3px;font-weight:500;color:${color || "var(--text)"}">${value}</p><p class="muted" style="font-size:11.5px;margin:0">${label}</p></div>`;
 }
 
 function renderDashboard(enriched, closed, totalPL, balance, todayPL) {
@@ -288,7 +378,7 @@ function renderDashboard(enriched, closed, totalPL, balance, todayPL) {
   const remaining = Math.max(0, s.profitTarget - totalPL);
   const workingDaysNeeded = avgDailyPL && avgDailyPL > 0 ? Math.ceil(remaining / avgDailyPL) : null;
   const expectedDate = workingDaysNeeded != null ? addWorkingDays(new Date(), workingDaysNeeded) : null;
-  const suggestedDailyTarget = remaining / 20; // benchmark: reach it within ~20 trading days (~1 month)
+  const suggestedDailyTarget = remaining / 20;
 
   const drawdown = Math.max(0, peak - balance);
   const dailyLossUsed = Math.max(0, -todayPL);
@@ -308,30 +398,6 @@ function renderDashboard(enriched, closed, totalPL, balance, todayPL) {
   const rValues = closed.filter((t) => t.rMultiple != null);
   const avgRRR = rValues.length ? (rValues.reduce((a, t) => a + t.rMultiple, 0) / rValues.length).toFixed(2) : "—";
   const expectancy = closed.length ? fmtMoney(totalPL / closed.length, s.currency) : "—";
-
-  function objRow(label, detail, ratio, breached) {
-    const pct = Math.max(0, Math.min(100, ratio * 100));
-    return `
-      <div style="margin-bottom:16px">
-        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
-          <div>
-            <p style="font-size:14px;margin:0 0 2px">${label}</p>
-            <p class="mono muted" style="font-size:12px;margin:0">${detail}</p>
-          </div>
-          <div style="width:22px;height:22px;border-radius:50%;display:flex;align-items:center;justify-content:center;flex-shrink:0;background:${breached ? "rgba(193,85,74,0.15)" : "rgba(78,159,110,0.15)"};color:${breached ? "var(--loss)" : "var(--profit)"}">
-            ${breached ? ICONS.alert : ICONS.check}
-          </div>
-        </div>
-        <div style="height:4px;background:var(--panel-alt);border-radius:2px;overflow:hidden">
-          <div style="height:100%;width:${pct}%;background:var(--gold-fill);border-radius:2px"></div>
-        </div>
-      </div>
-    `;
-  }
-
-  function statCell(label, value, color) {
-    return `<div><p class="mono" style="font-size:17px;margin:0 0 3px;font-weight:500;color:${color || "var(--text)"}">${value}</p><p class="muted" style="font-size:11.5px;margin:0">${label}</p></div>`;
-  }
 
   const w = 280, h = 100;
   let sparkline = "";
@@ -360,14 +426,18 @@ function renderDashboard(enriched, closed, totalPL, balance, todayPL) {
   const openTrades = state.trades.filter((t) => t.exit === "" || t.exit === null || t.exit === undefined);
   let openPanel = "";
   if (openTrades.length > 0) {
+    const notifPermission = "Notification" in window ? Notification.permission : "unsupported";
     openPanel = `
     <div class="panel">
-      <p class="muted" style="font-size:13px;margin:0 0 14px;font-weight:500">Open positions</p>
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
+        <p class="muted" style="font-size:13px;margin:0;font-weight:500">Open positions</p>
+        ${notifPermission === "default" ? `<button id="enable-notifications" class="btn-outline" style="flex:0 0 auto;padding:4px 10px;display:flex;align-items:center;gap:5px">${ICONS.bell}Enable alerts</button>` : ""}
+      </div>
       ${openTrades.map((t) => {
         const livePriceMatches = state.livePrice && symbolsMatch(t.symbol, state.livePrice.symbol || s.symbol);
         const unrealizedPL = livePriceMatches ? calcPL({ ...t, exit: state.livePrice.price }, s.contractSize) : null;
         return `
-          <div style="display:flex;justify-content:space-between;align-items:center;padding:9px 0;border-bottom:0.5px solid var(--border)">
+          <div style="display:flex;justify-content:space-between;align-items:center;padding:9px 0;border-bottom:1px solid var(--border)">
             <div style="display:flex;align-items:center;gap:8px">
               <span style="color:${t.direction === "buy" ? "var(--profit)" : "var(--loss)"}">${t.direction === "buy" ? ICONS.up : ICONS.down}</span>
               <div>
@@ -384,6 +454,56 @@ function renderDashboard(enriched, closed, totalPL, balance, todayPL) {
       <p class="muted" style="font-size:11px;margin:10px 0 0">Auto-closes at SL/TP while this app is open, checked about once a minute.</p>
     </div>`;
   }
+
+  // weekly / monthly review
+  const thisWeekStart = startOfWeek(new Date());
+  const lastWeekStart = new Date(thisWeekStart); lastWeekStart.setDate(lastWeekStart.getDate() - 7);
+  const thisMonthStr = todayStr().slice(0, 7);
+  const lastMonthDate = new Date(); lastMonthDate.setMonth(lastMonthDate.getMonth() - 1);
+  const lastMonthStr = lastMonthDate.toISOString().slice(0, 7);
+
+  let thisWeekPL = 0, lastWeekPL = 0, thisMonthPL = 0, lastMonthPL = 0;
+  let bestDay = null, worstDay = null;
+  Object.entries(dailyTotals).forEach(([date, pl]) => {
+    const d = new Date(date);
+    if (d >= thisWeekStart) thisWeekPL += pl;
+    else if (d >= lastWeekStart && d < thisWeekStart) lastWeekPL += pl;
+    if (date.slice(0, 7) === thisMonthStr) {
+      thisMonthPL += pl;
+      if (!bestDay || pl > bestDay.pl) bestDay = { date, pl };
+      if (!worstDay || pl < worstDay.pl) worstDay = { date, pl };
+    } else if (date.slice(0, 7) === lastMonthStr) {
+      lastMonthPL += pl;
+    }
+  });
+  const weekTrend = thisWeekPL >= lastWeekPL ? "up" : "down";
+  const monthTrend = thisMonthPL >= lastMonthPL ? "up" : "down";
+
+  const reviewPanel = tradingDays.length > 0 ? `
+    <div class="panel">
+      <p class="muted" style="font-size:13px;margin:0 0 14px;font-weight:500">Weekly &amp; monthly review</p>
+      <div style="display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px solid var(--border)">
+        <span style="font-size:13px">This week</span>
+        <span style="display:flex;align-items:center;gap:6px">
+          <span class="mono" style="font-size:13px;color:${thisWeekPL >= 0 ? "var(--profit)" : "var(--loss)"}">${fmtSigned(thisWeekPL, s.currency)}</span>
+          <span style="color:${weekTrend === "up" ? "var(--profit)" : "var(--loss)"}">${weekTrend === "up" ? "▲" : "▼"}</span>
+        </span>
+      </div>
+      <div style="display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px solid var(--border)">
+        <span style="font-size:13px">Last week</span>
+        <span class="mono" style="font-size:13px;color:var(--text-muted)">${fmtSigned(lastWeekPL, s.currency)}</span>
+      </div>
+      <div style="display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px solid var(--border)">
+        <span style="font-size:13px">This month</span>
+        <span style="display:flex;align-items:center;gap:6px">
+          <span class="mono" style="font-size:13px;color:${thisMonthPL >= 0 ? "var(--profit)" : "var(--loss)"}">${fmtSigned(thisMonthPL, s.currency)}</span>
+          <span style="color:${monthTrend === "up" ? "var(--profit)" : "var(--loss)"}">${monthTrend === "up" ? "▲" : "▼"}</span>
+        </span>
+      </div>
+      ${bestDay ? `<div style="display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px solid var(--border)"><span style="font-size:13px">Best day (this month)</span><span class="mono" style="font-size:13px;color:var(--profit)">${fmtDate(bestDay.date)} · ${fmtSigned(bestDay.pl, s.currency)}</span></div>` : ""}
+      ${worstDay ? `<div style="display:flex;justify-content:space-between;padding:8px 0"><span style="font-size:13px">Worst day (this month)</span><span class="mono" style="font-size:13px;color:var(--loss)">${fmtDate(worstDay.date)} · ${fmtSigned(worstDay.pl, s.currency)}</span></div>` : ""}
+    </div>
+  ` : "";
 
   return `
     ${openPanel}
@@ -411,17 +531,18 @@ function renderDashboard(enriched, closed, totalPL, balance, todayPL) {
       <p class="muted" style="font-size:13px;margin:0 0 14px;font-weight:500">Equity curve</p>
       ${sparkline}
     </div>
+    ${reviewPanel}
     <div class="panel" style="margin-bottom:0">
       <p class="muted" style="font-size:13px;margin:0 0 14px;font-weight:500">Path to profit target</p>
-      <div style="display:flex;justify-content:space-between;padding:8px 0;border-bottom:0.5px solid var(--border)">
+      <div style="display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px solid var(--border)">
         <span style="font-size:13px">Remaining to target</span>
         <span class="mono" style="font-size:13px">${fmtMoney(remaining, s.currency)}</span>
       </div>
-      <div style="display:flex;justify-content:space-between;padding:8px 0;border-bottom:0.5px solid var(--border)">
+      <div style="display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px solid var(--border)">
         <span style="font-size:13px">Your avg pace</span>
         <span class="mono" style="font-size:13px;color:${avgDailyPL == null ? "var(--text)" : avgDailyPL >= 0 ? "var(--profit)" : "var(--loss)"}">${avgDailyPL == null ? "Not enough data yet" : `${fmtMoney(avgDailyPL, s.currency)}/day`}</span>
       </div>
-      <div style="display:flex;justify-content:space-between;padding:8px 0;border-bottom:0.5px solid var(--border)">
+      <div style="display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px solid var(--border)">
         <span style="font-size:13px">At this pace</span>
         <span class="mono" style="font-size:13px">${workingDaysNeeded == null ? "—" : `${workingDaysNeeded} trading day${workingDaysNeeded === 1 ? "" : "s"}`}</span>
       </div>
@@ -435,21 +556,49 @@ function renderDashboard(enriched, closed, totalPL, balance, todayPL) {
 }
 
 // ---------- Trades ----------
+function tradesToCSV(trades) {
+  const headers = ["Date", "Symbol", "Direction", "Entry", "Exit", "Lot", "SL", "TP", "PL", "R Multiple", "Strategy", "Emotion", "Notes"];
+  const rows = trades.map((t) => [
+    t.date, t.symbol, t.direction, t.entry, t.exit, t.lot, t.sl, t.tp,
+    t.pl != null ? t.pl.toFixed(2) : "", t.rMultiple != null ? t.rMultiple.toFixed(2) : "",
+    t.strategy || "", t.emotion, (t.notes || "").replace(/\n/g, " "),
+  ]);
+  const escCsv = (v) => {
+    const s = String(v ?? "");
+    return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+  };
+  return [headers, ...rows].map((r) => r.map(escCsv).join(",")).join("\n");
+}
+
+function downloadCSV(trades, accountName) {
+  const csv = tradesToCSV(trades);
+  const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `trades-${(accountName || "account").replace(/[^a-z0-9]+/gi, "-").toLowerCase()}-${todayStr()}.csv`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
 function renderTrades(enriched) {
-  if (enriched.length === 0) {
-    return `<h2 class="h-title">Trades</h2><p class="muted" style="font-size:13px;text-align:center;padding:24px 0">No trades yet.</p>`;
-  }
   return `
-    <h2 class="h-title">Trades</h2>
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
+      <h2 class="h-title" style="margin:0">Trades</h2>
+      ${enriched.length > 0 ? `<button id="export-csv" class="btn-outline" style="flex:0 0 auto;padding:6px 12px;display:flex;align-items:center;gap:6px">${ICONS.download}CSV</button>` : ""}
+    </div>
+    ${enriched.length === 0 ? `<p class="muted" style="font-size:13px;text-align:center;padding:24px 0">No trades yet.</p>` : ""}
     ${enriched.map((t) => {
       const open = state.expandedId === t.id;
       return `
-        <div style="border-bottom:0.5px solid var(--border)">
+        <div style="border-bottom:1px solid var(--border)">
           <div class="trade-row" data-expand="${t.id}">
             <div style="display:flex;align-items:center;gap:8px">
               <span style="color:${t.direction === "buy" ? "var(--profit)" : "var(--loss)"}">${t.direction === "buy" ? ICONS.up : ICONS.down}</span>
               <div>
-                <p style="font-size:13px;margin:0">${esc(t.symbol)}</p>
+                <p style="font-size:13px;margin:0">${esc(t.symbol)} ${t.strategy ? `<span class="muted" style="font-size:11px">· ${esc(t.strategy)}</span>` : ""}</p>
                 <p class="muted" style="font-size:11px;margin:0">${fmtDate(t.date)}</p>
               </div>
             </div>
@@ -465,6 +614,7 @@ function renderTrades(enriched) {
                 <span>Exit: <span class="mono" style="color:var(--text)">${t.exit || "—"}</span></span>
                 <span>Lot: <span class="mono" style="color:var(--text)">${esc(t.lot)}</span></span>
                 <span>R: <span class="mono" style="color:var(--text)">${t.rMultiple != null ? t.rMultiple.toFixed(2) : "—"}</span></span>
+                <span>Strategy: <span style="color:var(--text)">${t.strategy ? esc(t.strategy) : "—"}</span></span>
                 <span>Psychology: <span style="color:var(--text)">${esc(t.emotion)}</span></span>
               </div>
               ${t.notes ? `<p style="margin:0 0 10px">${esc(t.notes)}</p>` : ""}
@@ -488,7 +638,12 @@ function renderCalendar(closed) {
   const monthLabel = base.toLocaleDateString(undefined, { month: "long", year: "numeric" });
 
   const dailyPL = {};
-  closed.forEach((t) => { if (t.date) dailyPL[t.date] = (dailyPL[t.date] || 0) + t.pl; });
+  const dailyCount = {};
+  closed.forEach((t) => {
+    if (!t.date) return;
+    dailyPL[t.date] = (dailyPL[t.date] || 0) + t.pl;
+    dailyCount[t.date] = (dailyCount[t.date] || 0) + 1;
+  });
 
   const daysInMonth = new Date(year, month + 1, 0).getDate();
   const firstDow = (new Date(year, month, 1).getDay() + 6) % 7;
@@ -516,24 +671,27 @@ function renderCalendar(closed) {
           if (d === null) return `<div></div>`;
           const dateStr = `${year}-${String(month + 1).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
           const pl = dailyPL[dateStr];
+          const count = dailyCount[dateStr];
           const isToday = dateStr === todayISO;
           const isSelected = dateStr === state.calSelected;
           return `
             <button class="day-cell ${isToday ? "today" : ""} ${isSelected ? "selected" : ""}" data-day="${dateStr}">
               <span style="font-size:12.5px">${d}</span>
               ${pl != null ? `<span class="mono" style="font-size:8.5px;color:${pl >= 0 ? "var(--profit)" : "var(--loss)"};margin-top:1px">${pl >= 0 ? "+" : ""}${Math.round(pl)}</span>` : ""}
+              ${count ? `<span class="muted" style="font-size:7.5px;margin-top:1px">${count} trade${count === 1 ? "" : "s"}</span>` : ""}
             </button>
           `;
         }).join("")}
       </div>
     </div>
+
     <div class="panel">
       <p class="muted" style="font-size:13px;margin:0 0 8px">${fmtDate(state.calSelected)}</p>
       <p class="mono" style="font-size:22px;margin:0 0 14px;color:${selectedTrades.length ? (selectedPL >= 0 ? "var(--profit)" : "var(--loss)") : "var(--text)"}">
         ${selectedTrades.length ? fmtSigned(selectedPL, state.settings.currency) : "No trades"}
       </p>
       ${selectedTrades.map((t) => `
-        <div style="display:flex;justify-content:space-between;padding:7px 0;border-top:0.5px solid var(--border);font-size:12.5px">
+        <div style="display:flex;justify-content:space-between;padding:7px 0;border-top:1px solid var(--border);font-size:12.5px">
           <span>${esc(t.symbol)} · ${t.direction}</span>
           <span class="mono" style="color:${t.pl >= 0 ? "var(--profit)" : "var(--loss)"}">${fmtMoney(t.pl, state.settings.currency)}</span>
         </div>
@@ -546,14 +704,16 @@ function renderCalendar(closed) {
 function renderTargets() {
   const s = state.settings;
   return `
-    <h2 class="h-title">Targets & account</h2>
+    <h2 class="h-title">Targets &amp; account</h2>
     <div class="panel">
+      <div class="field"><label>Account name</label><input id="f-name" value="${esc(s.name)}" /></div>
       <div class="field"><label>Starting balance ($)</label><input class="mono" id="f-startingBalance" value="${s.startingBalance}" inputmode="decimal" /></div>
       <div class="field"><label>Daily loss limit ($)</label><input class="mono" id="f-dailyLossLimit" value="${s.dailyLossLimit}" inputmode="decimal" /></div>
       <div class="field"><label>Max overall loss ($)</label><input class="mono" id="f-maxOverallLoss" value="${s.maxOverallLoss}" inputmode="decimal" /></div>
       <div class="field"><label>Profit target ($)</label><input class="mono" id="f-profitTarget" value="${s.profitTarget}" inputmode="decimal" /></div>
       <p class="muted" style="font-size:12px;margin:0 0 16px;line-height:1.5">These set the reference lines objectives are measured against — set them to whatever risk plan you're running on ${esc(s.broker) || "your broker"}.</p>
-      <div style="border-top:0.5px solid var(--border);padding-top:14px;margin-bottom:14px">
+
+      <div style="border-top:1px solid var(--border);padding-top:14px;margin-bottom:14px">
         <div class="row">
           <div class="field"><label>Symbol</label><input id="f-symbol" value="${esc(s.symbol)}" /></div>
           <div class="field"><label>Broker</label><input id="f-broker" value="${esc(s.broker)}" /></div>
@@ -563,6 +723,7 @@ function renderTargets() {
           <div class="field"><label>Contract size per lot</label><input class="mono" id="f-contractSize" value="${s.contractSize}" inputmode="decimal" /></div>
         </div>
       </div>
+
       <button class="btn-primary" id="save-targets">Save targets</button>
     </div>
   `;
@@ -570,7 +731,7 @@ function renderTargets() {
 
 // ---------- Trade Form ----------
 function renderTradeForm() {
-  const t = state.editingTrade || { date: todayStr(), symbol: state.settings.symbol, direction: "buy", entry: "", exit: "", lot: "", sl: "", tp: "", emotion: "calm", notes: "" };
+  const t = state.editingTrade || { date: todayStr(), symbol: state.settings.symbol, direction: "buy", entry: "", exit: "", lot: "", sl: "", tp: "", emotion: "calm", strategy: "", notes: "" };
   return `
     <div style="padding:18px">
       <div style="display:flex;align-items:center;gap:10px;margin-bottom:18px">
@@ -603,13 +764,19 @@ function renderTradeForm() {
         <div class="field"><label>Stop loss</label><input class="mono" id="tf-sl" value="${esc(t.sl)}" inputmode="decimal" /></div>
         <div class="field"><label>Take profit</label><input class="mono" id="tf-tp" value="${esc(t.tp)}" inputmode="decimal" /></div>
       </div>
-      <div class="field">
-        <label>Psychology</label>
-        <select id="tf-emotion">${EMOTIONS.map((em) => `<option value="${em}" ${t.emotion === em ? "selected" : ""}>${em}</option>`).join("")}</select>
+      <div class="row">
+        <div class="field">
+          <label>Strategy</label>
+          <select id="tf-strategy">${STRATEGIES.map((s) => `<option value="${s}" ${t.strategy === s ? "selected" : ""}>${s || "— none —"}</option>`).join("")}</select>
+        </div>
+        <div class="field">
+          <label>Psychology</label>
+          <select id="tf-emotion">${EMOTIONS.map((em) => `<option value="${em}" ${t.emotion === em ? "selected" : ""}>${em}</option>`).join("")}</select>
+        </div>
       </div>
       <div class="field"><label>Notes</label><textarea id="tf-notes" rows="3">${esc(t.notes)}</textarea></div>
       <p id="tf-error" style="color:var(--loss);font-size:13px;display:none;margin-top:-6px;margin-bottom:12px"></p>
-      <button class="btn-primary" id="tf-submit" data-direction="${t.direction}">Save trade</button>
+      <button class="btn-primary" id="tf-submit">Save trade</button>
     </div>
   `;
 }
@@ -641,7 +808,8 @@ function attachFormHandlers() {
     const formData = {
       date: val("tf-date"), symbol: val("tf-symbol"), direction,
       entry, exit: val("tf-exit"), lot, sl: val("tf-sl"), tp: val("tf-tp"),
-      emotion: val("tf-emotion"), notes: val("tf-notes"),
+      emotion: val("tf-emotion"), strategy: val("tf-strategy"), notes: val("tf-notes"),
+      accountId: state.currentAccountId,
     };
     const hasExit = formData.exit !== "";
     const pl = hasExit ? calcPL(formData, state.settings.contractSize) : null;
@@ -671,6 +839,15 @@ function attachFormHandlers() {
 function attachMainHandlers(enriched) {
   const priceBtn = document.getElementById("refresh-price");
   if (priceBtn) priceBtn.addEventListener("click", () => { state.livePrice = null; state.priceError = false; render(); refreshPrice(); });
+
+  const acctSwitcher = document.getElementById("account-switcher");
+  if (acctSwitcher) acctSwitcher.addEventListener("change", () => switchAccount(acctSwitcher.value));
+
+  const notifBtn = document.getElementById("enable-notifications");
+  if (notifBtn) notifBtn.addEventListener("click", async () => { await Notification.requestPermission(); render(); });
+
+  const csvBtn = document.getElementById("export-csv");
+  if (csvBtn) csvBtn.addEventListener("click", () => downloadCSV(enriched, state.settings.name));
 
   document.querySelectorAll("[data-expand]").forEach((el) => {
     el.addEventListener("click", () => {
@@ -704,7 +881,8 @@ function attachMainHandlers(enriched) {
   if (saveBtn) {
     saveBtn.addEventListener("click", async () => {
       const val = (id) => document.getElementById(id).value;
-      const newSettings = {
+      const newAccount = {
+        name: val("f-name") || "Account",
         startingBalance: parseFloat(val("f-startingBalance")) || 0,
         dailyLossLimit: parseFloat(val("f-dailyLossLimit")) || 0,
         maxOverallLoss: parseFloat(val("f-maxOverallLoss")) || 0,
@@ -715,7 +893,9 @@ function attachMainHandlers(enriched) {
         contractSize: parseFloat(val("f-contractSize")) || 1,
       };
       try {
-        state.settings = await putSettings(newSettings);
+        const updated = await updateAccountApi(state.currentAccountId, newAccount);
+        state.settings = updated;
+        state.accounts = state.accounts.map((a) => (a.id === updated.id ? updated : a));
         state.saveError = false;
       } catch (e) {
         state.saveError = true;
