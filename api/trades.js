@@ -4,9 +4,20 @@ const { pageToTrade, tradeToProperties } = require("../lib/trades");
 module.exports = async (req, res) => {
   try {
     if (req.method === "GET") {
+      const accountId = req.query.accountId;
+      const includeUnassigned = req.query.includeUnassigned === "1";
+      const body = { sorts: [{ property: "Date", direction: "descending" }], page_size: 100 };
+      if (accountId) {
+        body.filter = includeUnassigned
+          ? { or: [
+              { property: "Account", relation: { contains: accountId } },
+              { property: "Account", relation: { is_empty: true } },
+            ] }
+          : { property: "Account", relation: { contains: accountId } };
+      }
       const data = await notionFetch(`/databases/${process.env.NOTION_TRADES_DB}/query`, {
         method: "POST",
-        body: JSON.stringify({ sorts: [{ property: "Date", direction: "descending" }], page_size: 100 }),
+        body: JSON.stringify(body),
       });
       return res.status(200).json(data.results.map(pageToTrade));
     }
